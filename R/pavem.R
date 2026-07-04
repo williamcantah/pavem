@@ -1,0 +1,666 @@
+# pavem: simple Panel VAR and Panel VECM workflows.
+
+chk_cols <- function(data, cols) {
+  missing <- setdiff(cols, names(data))
+  if (length(missing) > 0) {
+    stop("These columns are missing: ", paste(missing, collapse = ", "), call. = FALSE)
+  }
+}
+
+dec_p <- function(p, alpha = 0.05, null = "null hypothesis") {
+  if (is.na(p)) return("No p-value available")
+  if (p < alpha) {
+    paste("Reject", null)
+  } else {
+    paste("Do not reject", null)
+  }
+}
+
+first_num <- function(x) {
+  if (is.null(x)) return(NA_real_)
+  as.numeric(x)[1]
+}
+
+get_ht <- function(x) {
+  if (inherits(x, "purtest")) x <- x$statistic
+  list(
+    statistic = first_num(x$statistic),
+    p.value = first_num(x$p.value),
+    parameter = first_num(x$parameter),
+    method = if (!is.null(x$method)) x$method else NA_character_
+  )
+}
+
+as_panel_list <- function(data, id, time, vars) {
+  chk_cols(data, c(id, time, vars))
+  data <- data[order(data[[id]], data[[time]]), , drop = FALSE]
+  ids <- unique(data[[id]])
+  out <- lapply(ids, function(one_id) {
+    one <- data[data[[id]] == one_id, vars, drop = FALSE]
+    stats::ts(one, start = min(data[data[[id]] == one_id, time]), frequency = 1)
+  })
+  names(out) <- ids
+  out
+}
+
+companion_stab <- function(A, lags, vars) {
+  k <- length(vars)
+  lag_cols <- grep("\\.l[0-9]+$", colnames(A), value = TRUE)
+  lag_mat <- as.matrix(A[, lag_cols, drop = FALSE])
+
+  if (lags == 1) {
+    comp <- lag_mat
+  } else {
+    comp <- rbind(
+      lag_mat,
+      cbind(
+        diag(k * (lags - 1)),
+        matrix(0, nrow = k * (lags - 1), ncol = k)
+      )
+    )
+  }
+
+  ev <- eigen(comp)$values
+  data.frame(
+    eigenvalue = as.character(round(ev, 5)),
+    modulus = Mod(ev),
+    stable = Mod(ev) < 1,
+    row.names = NULL
+  )
+}
+
+#' Prepare panel data
+#'
+#' Sorts a panel data frame and optionally keeps selected variables.
+#'
+#' @param data Data frame.
+#' @param id Cross-section identifier column name.
+#' @param time Time identifier column name.
+#' @param vars Optional vector of variable names to keep.
+#' @return Sorted data frame.
+#' @export
+prep <- function(data, id, time, vars = NULL) {
+  data <- as.data.frame(data)
+  keep <- unique(c(id, time, vars))
+  chk_cols(data, keep)
+  out <- data[order(data[[id]], data[[time]]), keep, drop = FALSE]
+  row.names(out) <- NULL
+  out
+}
+
+#' Cross-sectional dependence tests
+#'
+#' Runs Pesaran CD or Breusch-Pagan LM tests for each variable using
+#' `plm::pcdtest()`.
+#'
+#' @param data Data frame.
+#' @param id Cross-section identifier column.
+#' @param time Time identifier column.
+#' @param vars Variables to test.
+#' @param test Test type passed to `plm::pcdtest()`, usually `"cd"` or `"lm"`.
+#' @param alpha Significance level.
+#' @return Data frame with statistics, p-values, and decisions.
+#' @export
+csdt <- function(data, id, time, vars, test = "cd", alpha = 0.05) {
+  chk_cols(data, c(id, time, vars))
+  pdata <- plm::pdata.frame(data, index = c(id, time))
+  ans <- lapply(vars, function(v) {
+    fml <- stats::as.formula(paste(v, "~ 1"))
+    z <- plm::pcdtest(fml, data = pdata, test = test)
+    p <- first_num(z$p.value)
+    data.frame(
+      variable = v,
+      test = test,
+      statistic = first_num(z$statistic),
+      p.value = p,
+      reject = !is.na(p) && p < alpha,
+      null = "No cross-sectional dependence",
+      decision = dec_p(p, alpha, "H0"),
+      row.names = NULL
+    )
+  })
+  do.call(rbind, ans)
+}
+
+#' Panel unit-root tests
+#'
+#' Runs `plm::purtest()` for all requested variables and tests.
+#'
+#' @param data Data frame.
+#' @param id Cross-section identifier column.
+#' @param time Time identifier column.
+#' @param vars Variables to test.
+#' @param tests Unit-root tests, e.g. `"ips"`, `"madwu"`, `"levinlin"`,
+#'   `"Pm"`, `"breitung"`, or `"hadri"`.
+#' @param exo Deterministic component passed to `plm::purtest()`.
+#' @param lags Lag choice passed to `plm::purtest()`.
+#' @param alpha Significance level.
+#' @return Data frame with statistics, p-values, and decisions.
+#' @export
+urts <- function(data, id, time, vars,
+                 tests = c("ips", "madwu"),
+                 exo = "intercept", lags = 1, alpha = 0.05) {
+  chk_cols(data, c(id, time, vars))
+  pdata <- plm::pdata.frame(data, index = c(id, time))
+
+  rows <- list()
+  k <- 1
+  for (v in vars) {
+    for (tt in tests) {
+      z <- tryCatch(
+        plm::purtest(pdata[[v]], test = tt, exo = exo, lags = lags),
+        error = function(e) e
+      )
+
+      if (inherits(z, "error")) {
+        rows[[k]] <- data.frame(
+          variable = v, test = tt, statistic = NA_real_, p.value = NA_real_,
+          reject = NA, null = "Unit root",
+          decision = paste("Test failed:", z$message),
+          row.names = NULL
+        )
+      } else {
+        ht <- get_ht(z)
+        p <- ht$p.value
+        reject <- if (!is.na(p)) p < alpha else NA
+        rows[[k]] <- data.frame(
+          variable = v,
+          test = tt,
+          statistic = ht$statistic,
+          p.value = p,
+          reject = reject,
+          null = if (tt == "hadri") "Stationarity" else "Unit root",
+          decision = if (tt == "hadri") {
+            dec_p(p, alpha, "H0 of stationarity")
+          } else {
+            dec_p(p, alpha, "H0 of unit root")
+          },
+          row.names = NULL
+        )
+      }
+      k <- k + 1
+    }
+  }
+  do.call(rbind, rows)
+}
+
+#' Panel cointegration tests
+#'
+#' Runs either Pedroni's test via `pco::pedroni99()` or the panel Johansen
+#' rank test via `pvars::pcoint.JO()`.
+#'
+#' @param data Data frame.
+#' @param id Cross-section identifier column.
+#' @param time Time identifier column.
+#' @param y Dependent variable for Pedroni test.
+#' @param x Regressor variable for Pedroni test, or variables for Johansen.
+#' @param vars Variables for Johansen test. If supplied, overrides `y` and `x`.
+#' @param method `"ped"` for Pedroni or `"jo"` for panel Johansen.
+#' @param lags Lag order.
+#' @param type Deterministic case for `pvars::pcoint.JO()`.
+#' @param alpha Significance level.
+#' @return List with raw model output and a tidy decision table.
+#' @export
+coint <- function(data, id, time, y = NULL, x = NULL, vars = NULL,
+                  method = c("ped", "jo"), lags = 1,
+                  type = "Case3", alpha = 0.05) {
+  method <- match.arg(method)
+  if (method == "ped") {
+    chk_cols(data, c(id, time, y, x))
+    data <- data[order(data[[id]], data[[time]]), , drop = FALSE]
+    ids <- unique(data[[id]])
+    tlen <- length(unique(data[[time]]))
+    n <- length(ids)
+    ymat <- matrix(data[[y]], nrow = tlen, ncol = n)
+    xmat <- matrix(data[[x]], nrow = tlen, ncol = n)
+    raw <- pco::pedroni99(Y = ymat, X = xmat, kk = lags, type.stat = 1, ka = 2)
+    stat <- as.data.frame(raw$STATISTIC)
+    stat$test <- row.names(stat)
+    row.names(stat) <- NULL
+    stat$direction <- ifelse(grepl("ni", stat$test), "right-tail", "left-tail")
+    stat$critical <- ifelse(stat$direction == "right-tail",
+                            stats::qnorm(1 - alpha), stats::qnorm(alpha))
+    stat$reject <- ifelse(stat$direction == "right-tail",
+                          stat$standardized > stat$critical,
+                          stat$standardized < stat$critical)
+    stat$null <- "No cointegration"
+    stat$decision <- ifelse(stat$reject, "Reject H0", "Do not reject H0")
+    return(list(method = "pedroni99", raw = raw, table = stat))
+  }
+
+  if (is.null(vars)) vars <- c(y, x)
+  chk_cols(data, c(id, time, vars))
+  L.data <- as_panel_list(data, id, time, vars)
+  raw <- pvars::pcoint.JO(L.data = L.data, lags = lags, type = type)
+  pvals <- as.data.frame(raw$panel$pvals)
+  stats <- as.data.frame(raw$panel$stats)
+  long <- data.frame()
+  for (i in seq_len(nrow(pvals))) {
+    for (j in seq_len(ncol(pvals))) {
+      p <- as.numeric(pvals[i, j])
+      long <- rbind(long, data.frame(
+        test = row.names(pvals)[i],
+        rank_null = colnames(pvals)[j],
+        statistic = as.numeric(stats[i, j]),
+        p.value = p,
+        reject = !is.na(p) && p < alpha,
+        null = paste("Cointegration rank", colnames(pvals)[j]),
+        decision = dec_p(p, alpha, "H0"),
+        row.names = NULL
+      ))
+    }
+  }
+  list(method = "pcoint.JO", raw = raw, table = long)
+}
+
+#' Panel VAR lag selection
+#'
+#' Uses `panelvar::pvargmm()` with multiple lag orders.
+#'
+#' @export
+pvls <- function(data, id, time, vars, lags = 1:3,
+                 transformation = "fod", steps = "onestep",
+                 system = TRUE, max_instr = 4, min_instr = 2L,
+                 collapse = TRUE) {
+  data <- as.data.frame(data)
+  chk_cols(data, c(id, time, vars))
+  panelvar::pvargmm(
+    dependent_vars = vars,
+    lags = lags,
+    transformation = transformation,
+    data = data,
+    panel_identifier = c(id, time),
+    steps = steps,
+    system_instruments = system,
+    max_instr_dependent_vars = max_instr,
+    min_instr_dependent_vars = min_instr,
+    collapse = collapse
+  )
+}
+
+#' Estimate a Panel VAR
+#'
+#' @export
+pvar <- function(data, id, time, vars, lags = 1,
+                 transformation = "fod", steps = "onestep",
+                 system = TRUE, max_instr = 4, min_instr = 2L,
+                 collapse = TRUE) {
+  data <- as.data.frame(data)
+  fit <- panelvar::pvargmm(
+    dependent_vars = vars,
+    lags = lags,
+    transformation = transformation,
+    data = data,
+    panel_identifier = c(id, time),
+    steps = steps,
+    system_instruments = system,
+    max_instr_dependent_vars = max_instr,
+    min_instr_dependent_vars = min_instr,
+    collapse = collapse
+  )
+  structure(list(model = fit, vars = vars, id = id, time = time, lags = lags),
+            class = "pav_pvar")
+}
+
+#' Panel VAR diagnostics
+#'
+#' @export
+pvdi <- function(obj) {
+  model <- if (inherits(obj, "pav_pvar")) obj$model else obj
+  stab <- panelvar::stability(model)
+  hansen <- tryCatch(panelvar::hansen_j_test(model), error = function(e) e)
+  list(stability = stab, hansen = hansen)
+}
+
+#' Panel VAR impulse responses
+#'
+#' @export
+pvir <- function(obj, n.ahead = 10, draws = 200, ci = 0.95, cores = 1) {
+  model <- if (inherits(obj, "pav_pvar")) obj$model else obj
+  point <- panelvar::oirf(model, n.ahead = n.ahead)
+  bands <- panelvar::bootstrap_irf(
+    model,
+    typeof_irf = "OIRF",
+    n.ahead = n.ahead,
+    nof_Nstar_draws = draws,
+    confidence.band = ci,
+    mc.cores = cores
+  )
+  table <- data.frame()
+  for (response in names(point)) {
+    for (impulse in colnames(point[[response]])) {
+      h <- seq_len(nrow(point[[response]])) - 1
+      table <- rbind(table, data.frame(
+        horizon = h,
+        response = response,
+        impulse = impulse,
+        irf = point[[response]][, impulse],
+        lower = bands$Lower[[response]][, impulse],
+        upper = bands$Upper[[response]][, impulse],
+        row.names = NULL
+      ))
+    }
+  }
+  list(point = point, bands = bands, table = table)
+}
+
+#' Panel VAR FEVD
+#'
+#' @export
+pvfd <- function(obj, n.ahead = 10) {
+  model <- if (inherits(obj, "pav_pvar")) obj$model else obj
+  raw <- panelvar::fevd_orthogonal(model, n.ahead = n.ahead)
+  table <- data.frame()
+  for (response in names(raw)) {
+    mat <- raw[[response]]
+    for (impulse in colnames(mat)) {
+      table <- rbind(table, data.frame(
+        horizon = seq_len(nrow(mat)),
+        response = response,
+        impulse = impulse,
+        share = mat[, impulse],
+        row.names = NULL
+      ))
+    }
+  }
+  list(raw = raw, table = table)
+}
+
+#' Plot Panel VAR IRFs
+#'
+#' Plots PVAR impulse responses with confidence intervals.
+#'
+#' @param x Output from `pvir()` or a fitted object from `pvar()`.
+#' @param n.ahead IRF horizon if `x` is a fitted PVAR object.
+#' @param draws Bootstrap draws if `x` is a fitted PVAR object.
+#' @param ci Confidence interval if `x` is a fitted PVAR object.
+#' @param file Optional PDF file path.
+#' @param col Line color.
+#' @param shade Shaded confidence-band color.
+#' @return Invisibly returns the IRF table used for plotting.
+#' @export
+pipl <- function(x, n.ahead = 10, draws = 200, ci = 0.95,
+                 file = NULL, col = "steelblue",
+                 shade = grDevices::rgb(0.2, 0.4, 0.8, 0.20)) {
+  ir <- if (is.list(x) && !is.null(x$table) && all(c("irf", "lower", "upper") %in% names(x$table))) {
+    x
+  } else {
+    pvir(x, n.ahead = n.ahead, draws = draws, ci = ci)
+  }
+
+  if (!is.null(file)) grDevices::pdf(file, width = 10, height = 7)
+  on.exit(if (!is.null(file)) grDevices::dev.off(), add = TRUE)
+
+  tab <- ir$table
+  pairs <- unique(tab[, c("response", "impulse")])
+  for (i in seq_len(nrow(pairs))) {
+    one <- tab[tab$response == pairs$response[i] & tab$impulse == pairs$impulse[i], ]
+    yr <- range(c(one$lower, one$upper, one$irf), na.rm = TRUE)
+    graphics::plot(
+      one$horizon, one$irf, type = "n", ylim = yr,
+      xlab = "Years after shock", ylab = "Response",
+      main = paste("PVAR:", pairs$response[i], "response to", pairs$impulse[i], "shock")
+    )
+    graphics::polygon(
+      c(one$horizon, rev(one$horizon)),
+      c(one$lower, rev(one$upper)),
+      col = shade, border = NA
+    )
+    graphics::abline(h = 0, lty = 2, col = "gray50")
+    graphics::lines(one$horizon, one$irf, lwd = 2, col = col)
+    graphics::lines(one$horizon, one$lower, lty = 3, col = col)
+    graphics::lines(one$horizon, one$upper, lty = 3, col = col)
+  }
+  invisible(tab)
+}
+
+#' Plot Panel VAR FEVD
+#'
+#' Plots PVAR forecast error variance decompositions.
+#'
+#' @param x Output from `pvfd()` or a fitted object from `pvar()`.
+#' @param n.ahead FEVD horizon if `x` is a fitted PVAR object.
+#' @param file Optional PDF file path.
+#' @param cols Bar colors.
+#' @return Invisibly returns the FEVD table used for plotting.
+#' @export
+pfpl <- function(x, n.ahead = 10, file = NULL,
+                 cols = c("steelblue", "goldenrod", "darkseagreen",
+                          "firebrick", "mediumpurple", "gray50")) {
+  fd <- if (is.list(x) && !is.null(x$table) && "share" %in% names(x$table)) {
+    x
+  } else {
+    pvfd(x, n.ahead = n.ahead)
+  }
+
+  if (!is.null(file)) grDevices::pdf(file, width = 10, height = 7)
+  on.exit(if (!is.null(file)) grDevices::dev.off(), add = TRUE)
+
+  tab <- fd$table
+  for (response in unique(tab$response)) {
+    one <- tab[tab$response == response, ]
+    mat <- stats::xtabs(share ~ impulse + horizon, data = one)
+    graphics::barplot(
+      mat, beside = FALSE, col = cols[seq_len(nrow(mat))],
+      main = paste("PVAR FEVD for", response),
+      xlab = "Forecast horizon", ylab = "Proportion",
+      legend.text = rownames(mat),
+      args.legend = list(x = "topright", bty = "n")
+    )
+  }
+  invisible(tab)
+}
+
+#' Estimate a Panel VECM
+#'
+#' @export
+vecm <- function(data, id, time, vars, lags = 2, rank = 1,
+                 type = "Case3", order = vars) {
+  data <- as.data.frame(data)
+  L.data <- as_panel_list(data, id, time, vars)
+  rank_test <- pvars::pcoint.JO(L.data = L.data, lags = lags, type = type)
+  fit <- pvars::pvarx.VEC(L.data = L.data, lags = lags, dim_r = rank, type = type)
+  ident <- pvars::pid.chol(fit, order_k = order)
+  structure(list(
+    model = fit, identified = ident, rank_test = rank_test,
+    L.data = L.data, vars = vars, id = id, time = time, lags = lags,
+    rank = rank, type = type, order = order
+  ), class = "pav_vecm")
+}
+
+#' Panel VECM diagnostics
+#'
+#' @export
+vedi <- function(obj) {
+  if (!inherits(obj, "pav_vecm")) stop("obj must come from vecm().", call. = FALSE)
+  stab <- companion_stab(obj$model$A, obj$lags, obj$vars)
+  list(
+    rank_test = obj$rank_test$panel,
+    stability = stab,
+    stable = all(stab$stable),
+    beta = obj$model$beta,
+    impact = obj$identified$B
+  )
+}
+
+boot_veir <- function(obj, n.ahead, draws, seed) {
+  country_names <- names(obj$L.data)
+  point <- vars::irf(obj$identified, n.ahead = n.ahead)
+  irf_names <- names(point$irf)[-1]
+  horizon <- point$irf[[1]]
+  vals <- array(NA_real_, c(length(horizon), length(irf_names), draws),
+                dimnames = list(horizon, irf_names, paste0("draw_", seq_len(draws))))
+  set.seed(seed)
+  for (d in seq_len(draws)) {
+    samp <- sample(country_names, length(country_names), replace = TRUE)
+    Ls <- obj$L.data[samp]
+    names(Ls) <- paste0(samp, "_", seq_along(samp))
+    draw <- tryCatch({
+      fit <- pvars::pvarx.VEC(L.data = Ls, lags = obj$lags,
+                              dim_r = obj$rank, type = obj$type)
+      idfit <- pvars::pid.chol(fit, order_k = obj$order)
+      vars::irf(idfit, n.ahead = n.ahead)
+    }, error = function(e) NULL)
+    if (!is.null(draw)) {
+      for (nm in irf_names) vals[, nm, d] <- draw$irf[[nm]]
+    }
+  }
+  list(
+    lower = apply(vals, c(1, 2), stats::quantile, probs = 0.025, na.rm = TRUE),
+    upper = apply(vals, c(1, 2), stats::quantile, probs = 0.975, na.rm = TRUE),
+    draws_used = sum(!is.na(vals[1, 1, ]))
+  )
+}
+
+#' Panel VECM impulse responses
+#'
+#' @export
+veir <- function(obj, n.ahead = 10, draws = 200, seed = 123) {
+  if (!inherits(obj, "pav_vecm")) stop("obj must come from vecm().", call. = FALSE)
+  point <- vars::irf(obj$identified, n.ahead = n.ahead)
+  bands <- boot_veir(obj, n.ahead = n.ahead, draws = draws, seed = seed)
+  table <- data.frame()
+  for (response in obj$vars) {
+    for (impulse in obj$vars) {
+      nm <- paste0("epsilon[ ", impulse, " ] %->% ", response)
+      table <- rbind(table, data.frame(
+        horizon = point$irf[[1]],
+        response = response,
+        impulse = impulse,
+        irf = point$irf[[nm]],
+        lower = bands$lower[, nm],
+        upper = bands$upper[, nm],
+        row.names = NULL
+      ))
+    }
+  }
+  list(point = point, bands = bands, table = table)
+}
+
+#' Plot Panel VECM IRFs
+#'
+#' Plots Panel VECM impulse responses with confidence intervals.
+#'
+#' @param x Output from `veir()` or a fitted object from `vecm()`.
+#' @param n.ahead IRF horizon if `x` is a fitted Panel VECM object.
+#' @param draws Bootstrap draws if `x` is a fitted Panel VECM object.
+#' @param seed Random seed for bootstrap if `x` is a fitted Panel VECM object.
+#' @param file Optional PDF file path.
+#' @param col Line color.
+#' @param shade Shaded confidence-band color.
+#' @return Invisibly returns the IRF table used for plotting.
+#' @export
+vipl <- function(x, n.ahead = 10, draws = 200, seed = 123,
+                 file = NULL, col = "firebrick",
+                 shade = grDevices::rgb(0.7, 0.3, 0.1, 0.20)) {
+  ir <- if (is.list(x) && !is.null(x$table) && all(c("irf", "lower", "upper") %in% names(x$table))) {
+    x
+  } else {
+    veir(x, n.ahead = n.ahead, draws = draws, seed = seed)
+  }
+
+  if (!is.null(file)) grDevices::pdf(file, width = 10, height = 7)
+  on.exit(if (!is.null(file)) grDevices::dev.off(), add = TRUE)
+
+  tab <- ir$table
+  pairs <- unique(tab[, c("response", "impulse")])
+  for (i in seq_len(nrow(pairs))) {
+    one <- tab[tab$response == pairs$response[i] & tab$impulse == pairs$impulse[i], ]
+    yr <- range(c(one$lower, one$upper, one$irf), na.rm = TRUE)
+    graphics::plot(
+      one$horizon, one$irf, type = "n", ylim = yr,
+      xlab = "Years after shock", ylab = "Response",
+      main = paste("Panel VECM:", pairs$response[i], "response to", pairs$impulse[i], "shock")
+    )
+    graphics::polygon(
+      c(one$horizon, rev(one$horizon)),
+      c(one$lower, rev(one$upper)),
+      col = shade, border = NA
+    )
+    graphics::abline(h = 0, lty = 2, col = "gray50")
+    graphics::lines(one$horizon, one$irf, lwd = 2, col = col)
+    graphics::lines(one$horizon, one$lower, lty = 3, col = col)
+    graphics::lines(one$horizon, one$upper, lty = 3, col = col)
+  }
+  invisible(tab)
+}
+
+#' Panel VECM FEVD
+#'
+#' @export
+vefd <- function(obj, n.ahead = 10) {
+  if (!inherits(obj, "pav_vecm")) stop("obj must come from vecm().", call. = FALSE)
+  ir <- vars::irf(obj$identified, n.ahead = n.ahead)
+  table <- data.frame()
+  for (response in obj$vars) {
+    sq <- matrix(NA_real_, nrow = length(ir$irf[[1]]), ncol = length(obj$vars))
+    colnames(sq) <- obj$vars
+    for (impulse in obj$vars) {
+      nm <- paste0("epsilon[ ", impulse, " ] %->% ", response)
+      sq[, impulse] <- ir$irf[[nm]]^2
+    }
+    cum <- apply(sq, 2, cumsum)
+    den <- rowSums(cum)
+    share <- sweep(cum, 1, den, "/")
+    for (impulse in obj$vars) {
+      table <- rbind(table, data.frame(
+        horizon = ir$irf[[1]],
+        response = response,
+        impulse = impulse,
+        share = share[, impulse],
+        row.names = NULL
+      ))
+    }
+  }
+  table
+}
+
+#' Plot Panel VECM FEVD
+#'
+#' Plots Panel VECM forecast error variance decompositions.
+#'
+#' @param x Output from `vefd()` or a fitted object from `vecm()`.
+#' @param n.ahead FEVD horizon if `x` is a fitted Panel VECM object.
+#' @param file Optional PDF file path.
+#' @param cols Bar colors.
+#' @return Invisibly returns the FEVD table used for plotting.
+#' @export
+vfpl <- function(x, n.ahead = 10, file = NULL,
+                 cols = c("steelblue", "goldenrod", "darkseagreen",
+                          "firebrick", "mediumpurple", "gray50")) {
+  tab <- if (is.data.frame(x) && "share" %in% names(x)) {
+    x
+  } else {
+    vefd(x, n.ahead = n.ahead)
+  }
+
+  if (!is.null(file)) grDevices::pdf(file, width = 10, height = 7)
+  on.exit(if (!is.null(file)) grDevices::dev.off(), add = TRUE)
+
+  for (response in unique(tab$response)) {
+    one <- tab[tab$response == response, ]
+    mat <- stats::xtabs(share ~ impulse + horizon, data = one)
+    graphics::barplot(
+      mat, beside = FALSE, col = cols[seq_len(nrow(mat))],
+      main = paste("Panel VECM FEVD for", response),
+      xlab = "Forecast horizon", ylab = "Proportion",
+      legend.text = rownames(mat),
+      args.legend = list(x = "topright", bty = "n")
+    )
+  }
+  invisible(tab)
+}
+
+#' Publication-ready Panel VECM results
+#'
+#' @export
+vpub <- function(obj, n.ahead = 10, draws = 200) {
+  if (!inherits(obj, "pav_vecm")) stop("obj must come from vecm().", call. = FALSE)
+  list(
+    model_coefficients = obj$model$A,
+    beta = obj$model$beta,
+    diagnostics = vedi(obj),
+    irf = veir(obj, n.ahead = n.ahead, draws = draws)$table,
+    fevd = vefd(obj, n.ahead = n.ahead)
+  )
+}
