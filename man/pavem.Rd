@@ -40,7 +40,7 @@ pvls(data, id, time, vars, lags = 1:3, transformation = "fod",
 pvar(data, id, time, vars, lags = 1, transformation = "fod",
      steps = "onestep", system = TRUE, max_instr = 4,
      min_instr = 2L, collapse = TRUE, prefer = "MBIC")
-pvdi(obj, alpha = 0.05, serial_lags = c(1, 2), plot = TRUE, file = NULL)
+pvdi(obj, alpha = 0.05, serial_lags = c(1, 2), plot = FALSE, file = NULL)
 pvir(obj, n.ahead = 10, draws = 200, ci = 0.95, cores = 1)
 pvfd(obj, n.ahead = 10)
 pipl(x, n.ahead = 10, draws = 200, ci = 0.95, file = NULL,
@@ -51,7 +51,7 @@ pfpl(x, n.ahead = 10, file = NULL,
 vels(data, id, time, vars, lags = 1:4, type = "const", prefer = "BIC")
 vecm(data, id, time, vars, lags = 2, rank = 1,
      type = "Case3", order = vars, prefer = "BIC")
-vedi(obj, alpha = 0.05, serial_lags = c(1, 2), plot = TRUE, file = NULL)
+vedi(obj, alpha = 0.05, serial_lags = c(1, 2), plot = FALSE, file = NULL)
 veir(obj, n.ahead = 10, draws = 200, seed = 123)
 vefd(obj, n.ahead = 10)
 vipl(x, n.ahead = 10, draws = 200, seed = 123, file = NULL,

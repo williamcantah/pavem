@@ -1,6 +1,6 @@
 Package: pavem
 Title: Simple Panel VAR and Panel VECM Workflows
-Version: 0.4.0
+Version: 0.3.0
 Authors@R: person("William", "Cantah", email = "williamcantah@example.com", role = c("aut", "cre"))
 Description: Beginner-friendly wrappers for cross-sectional dependence tests,
     panel unit-root tests, panel cointegration tests, Panel VAR estimation,
@@ -17,6 +17,6 @@ Suggests: readxl, knitr, rmarkdown
 URL: https://github.com/williamcantah/pavem
 BugReports: https://github.com/williamcantah/pavem/issues
 NeedsCompilation: no
-Packaged: 2026-07-05 15:28:27 UTC; williamg.cantah
+Packaged: 2026-07-05 14:36:22 UTC; williamg.cantah
 Author: William Cantah [aut, cre]
 Maintainer: William Cantah <williamcantah@example.com>
