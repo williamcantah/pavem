@@ -109,6 +109,133 @@ safe_varselect <- function(x, max_lag, type) {
   out$selection
 }
 
+diag_dec <- function(p, stat, crit, alpha = 0.05, null = "null") {
+  if (is.finite(p)) {
+    if (p < alpha) paste("Reject", null) else paste("Do not reject", null)
+  } else if (is.finite(stat) && is.finite(crit)) {
+    if (stat > crit) paste("Reject", null) else paste("Do not reject", null)
+  } else {
+    "Decision not available"
+  }
+}
+
+hansen_table <- function(model, alpha = 0.05) {
+  h <- tryCatch(panelvar::hansen_j_test(model), error = function(e) e)
+  if (inherits(h, "error")) {
+    return(data.frame(
+      test = "Hansen J", statistic = NA_real_, df = NA_real_,
+      p.value = NA_real_, critical.value = NA_real_,
+      null = "Overidentifying restrictions are valid",
+      decision = paste("Not available:", h$message),
+      available = FALSE, row.names = NULL
+    ))
+  }
+  stat <- first_num(h$statistic)
+  df <- first_num(h$parameter)
+  p <- first_num(h$p.value)
+  crit <- if (is.finite(df)) stats::qchisq(1 - alpha, df = df) else NA_real_
+  data.frame(
+    test = "Hansen J",
+    statistic = stat,
+    df = df,
+    p.value = p,
+    critical.value = crit,
+    null = "Overidentifying restrictions are valid",
+    decision = diag_dec(p, stat, crit, alpha, "H0"),
+    available = TRUE,
+    row.names = NULL
+  )
+}
+
+unavailable_iv_tests <- function(system = NA) {
+  rbind(
+    data.frame(
+      test = "Sargan",
+      statistic = NA_real_, df = NA_real_, p.value = NA_real_,
+      critical.value = NA_real_,
+      null = "Overidentifying restrictions are valid",
+      decision = "Not available from panelvar::pvargmm object",
+      available = FALSE, row.names = NULL
+    ),
+    data.frame(
+      test = "Difference-in-Hansen",
+      statistic = NA_real_, df = NA_real_, p.value = NA_real_,
+      critical.value = NA_real_,
+      null = "Instrument subset is valid",
+      decision = if (isTRUE(system)) {
+        "Not available from panelvar::pvargmm object"
+      } else {
+        "Not applicable because system instruments are not used"
+      },
+      available = FALSE, row.names = NULL
+    )
+  )
+}
+
+pvar_resid_list <- function(model) {
+  lapply(model$residuals, function(x) as.matrix(x))
+}
+
+vecm_resid_list <- function(obj) {
+  lapply(obj$model$L.varx, function(x) t(as.matrix(x$resid)))
+}
+
+serial_table <- function(resids, lags = c(1, 2), alpha = 0.05) {
+  vars <- unique(unlist(lapply(resids, colnames)))
+  rows <- list()
+  idx <- 1
+  for (v in vars) {
+    pooled <- unlist(lapply(resids, function(m) {
+      if (!v %in% colnames(m)) return(NULL)
+      as.numeric(m[, v])
+    }))
+    pooled <- pooled[is.finite(pooled)]
+    pooled <- pooled[abs(pooled) > .Machine$double.eps]
+    for (lg in lags) {
+      bt <- tryCatch(stats::Box.test(pooled, lag = lg, type = "Ljung-Box"),
+                     error = function(e) e)
+      if (inherits(bt, "error")) {
+        rows[[idx]] <- data.frame(
+          variable = v, test = paste0("Ljung-Box AR(", lg, ")"),
+          statistic = NA_real_, df = lg, p.value = NA_real_,
+          critical.value = stats::qchisq(1 - alpha, df = lg),
+          null = paste("No serial correlation up to lag", lg),
+          decision = paste("Not available:", bt$message),
+          row.names = NULL
+        )
+      } else {
+        stat <- first_num(bt$statistic)
+        p <- first_num(bt$p.value)
+        crit <- stats::qchisq(1 - alpha, df = lg)
+        rows[[idx]] <- data.frame(
+          variable = v, test = paste0("Ljung-Box AR(", lg, ")"),
+          statistic = stat, df = lg, p.value = p,
+          critical.value = crit,
+          null = paste("No serial correlation up to lag", lg),
+          decision = diag_dec(p, stat, crit, alpha, "H0"),
+          row.names = NULL
+        )
+      }
+      idx <- idx + 1
+    }
+  }
+  do.call(rbind, rows)
+}
+
+plot_stability <- function(tab, title = "Stability condition", file = NULL) {
+  if (!is.null(file)) grDevices::pdf(file, width = 7, height = 7)
+  on.exit(if (!is.null(file)) grDevices::dev.off(), add = TRUE)
+  theta <- seq(0, 2 * pi, length.out = 300)
+  graphics::plot(cos(theta), sin(theta), type = "l", asp = 1,
+                 xlab = "Real", ylab = "Imaginary", main = title,
+                 col = "gray50")
+  graphics::abline(h = 0, v = 0, col = "gray85")
+  eig <- tab$eigenvalue
+  if (!is.complex(eig)) eig <- suppressWarnings(as.complex(eig))
+  graphics::points(Re(eig), Im(eig), pch = 19, col = ifelse(tab$stable, "steelblue", "firebrick"))
+  invisible(tab)
+}
+
 #' Prepare panel data
 #'
 #' Sorts a panel data frame and optionally keeps selected variables.
@@ -385,12 +512,39 @@ pvar <- function(data, id, time, vars, lags = 1,
 
 #' Panel VAR diagnostics
 #'
+#' Returns instrument validity tests, residual serial-correlation tests, and
+#' stability results. Use `plot = TRUE` to draw the stability plot, or `file`
+#' to save it as a PDF.
+#'
 #' @export
-pvdi <- function(obj) {
+pvdi <- function(obj, alpha = 0.05, serial_lags = c(1, 2),
+                 plot = FALSE, file = NULL) {
   model <- if (inherits(obj, "pav_pvar")) obj$model else obj
-  stab <- panelvar::stability(model)
-  hansen <- tryCatch(panelvar::hansen_j_test(model), error = function(e) e)
-  list(stability = stab, hansen = hansen)
+  stab_raw <- panelvar::stability(model)
+  stab <- as.data.frame(stab_raw)
+  names(stab) <- tolower(names(stab))
+  stab$stable <- stab$modulus < 1
+  stab$critical.value <- 1
+  stab$decision <- ifelse(stab$stable,
+                          "Stable: modulus below 1",
+                          "Unstable: modulus at least 1")
+
+  instrument <- rbind(
+    hansen_table(model, alpha = alpha),
+    unavailable_iv_tests(system = isTRUE(model$system_instruments))
+  )
+  serial <- serial_table(pvar_resid_list(model), lags = serial_lags, alpha = alpha)
+
+  if (isTRUE(plot) || !is.null(file)) {
+    plot_stability(stab, title = "PVAR stability condition", file = file)
+  }
+
+  list(
+    instrument = instrument,
+    serial = serial,
+    stability = stab,
+    stability_plot = if (isTRUE(plot) || !is.null(file)) "generated" else "not requested"
+  )
 }
 
 #' Panel VAR impulse responses
@@ -616,16 +770,42 @@ vecm <- function(data, id, time, vars, lags = 2, rank = 1,
 
 #' Panel VECM diagnostics
 #'
+#' Returns rank-test information, residual serial-correlation tests, stability
+#' results, cointegrating vectors, and the Cholesky impact matrix. Use
+#' `plot = TRUE` to draw the stability plot, or `file` to save it as a PDF.
+#'
 #' @export
-vedi <- function(obj) {
+vedi <- function(obj, alpha = 0.05, serial_lags = c(1, 2),
+                 plot = FALSE, file = NULL) {
   if (!inherits(obj, "pav_vecm")) stop("obj must come from vecm().", call. = FALSE)
   stab <- companion_stab(obj$model$A, obj$lags, obj$vars)
+  stab$critical.value <- 1
+  stab$decision <- ifelse(stab$stable,
+                          "Stable: modulus below 1",
+                          "Unstable: modulus at least 1")
+  serial <- serial_table(vecm_resid_list(obj), lags = serial_lags, alpha = alpha)
+
+  if (isTRUE(plot) || !is.null(file)) {
+    plot_stability(stab, title = "Panel VECM stability condition", file = file)
+  }
+
   list(
     rank_test = obj$rank_test$panel,
+    instrument = data.frame(
+      test = "Instrument validity",
+      statistic = NA_real_, df = NA_real_, p.value = NA_real_,
+      critical.value = NA_real_,
+      null = "Instrument validity is not a VECM post-estimation test",
+      decision = "Not applicable: Panel VECM is not estimated by GMM instruments",
+      available = FALSE,
+      row.names = NULL
+    ),
+    serial = serial,
     stability = stab,
     stable = all(stab$stable),
     beta = obj$model$beta,
-    impact = obj$identified$B
+    impact = obj$identified$B,
+    stability_plot = if (isTRUE(plot) || !is.null(file)) "generated" else "not requested"
   )
 }
 

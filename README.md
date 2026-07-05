@@ -89,6 +89,10 @@ fit <- pvar(data, id = "country", time = "year",
             vars = vars, lags = "auto")
 
 pvdi(fit)
+pdiag <- pvdi(fit, file = "pvar_stability.pdf")
+pdiag$instrument
+pdiag$serial
+pdiag$stability
 pvir(fit, n.ahead = 10, draws = 200)$table
 pvfd(fit, n.ahead = 10)$table
 pipl(fit, n.ahead = 10, draws = 200, file = "pvar_irf.pdf")
@@ -102,6 +106,10 @@ vfit <- vecm(data, id = "country", time = "year",
              vars = vars, lags = "auto", rank = 1)
 
 vedi(vfit)
+vdiag <- vedi(vfit, file = "vecm_stability.pdf")
+vdiag$instrument
+vdiag$serial
+vdiag$stability
 veir(vfit, n.ahead = 10, draws = 200)$table
 vefd(vfit, n.ahead = 10)
 vipl(vfit, n.ahead = 10, draws = 200, file = "vecm_irf.pdf")

@@ -40,7 +40,7 @@ pvls(data, id, time, vars, lags = 1:3, transformation = "fod",
 pvar(data, id, time, vars, lags = 1, transformation = "fod",
      steps = "onestep", system = TRUE, max_instr = 4,
      min_instr = 2L, collapse = TRUE, prefer = "MBIC")
-pvdi(obj)
+pvdi(obj, alpha = 0.05, serial_lags = c(1, 2), plot = FALSE, file = NULL)
 pvir(obj, n.ahead = 10, draws = 200, ci = 0.95, cores = 1)
 pvfd(obj, n.ahead = 10)
 pipl(x, n.ahead = 10, draws = 200, ci = 0.95, file = NULL,
@@ -51,7 +51,7 @@ pfpl(x, n.ahead = 10, file = NULL,
 vels(data, id, time, vars, lags = 1:4, type = "const", prefer = "BIC")
 vecm(data, id, time, vars, lags = 2, rank = 1,
      type = "Case3", order = vars, prefer = "BIC")
-vedi(obj)
+vedi(obj, alpha = 0.05, serial_lags = c(1, 2), plot = FALSE, file = NULL)
 veir(obj, n.ahead = 10, draws = 200, seed = 123)
 vefd(obj, n.ahead = 10)
 vipl(x, n.ahead = 10, draws = 200, seed = 123, file = NULL,
@@ -91,6 +91,8 @@ vpub(obj, n.ahead = 10, draws = 200)
 \item{order}{Cholesky ordering for Panel VECM identification.}
 \item{seed}{Random seed for Panel VECM IRF bootstrap.}
 \item{file}{Optional PDF path for plot output.}
+\item{plot}{Logical. If TRUE, draw the stability plot.}
+\item{serial_lags}{Lags used for residual serial-correlation diagnostics.}
 \item{col}{Line color for IRF plots.}
 \item{shade}{Confidence-band shading color for IRF plots.}
 \item{cols}{Bar colors for FEVD plots.}
