@@ -70,7 +70,7 @@ companion_stab <- function(A, lags, vars) {
 }
 
 get_jstat <- function(model) {
-  out <- tryCatch(panelvar::hansen_j_test(model), error = function(e) NULL)
+  out <- tryCatch(suppressWarnings(panelvar::hansen_j_test(model)), error = function(e) NULL)
   nums <- suppressWarnings(as.numeric(unlist(out)))
   nums <- nums[is.finite(nums)]
   if (length(nums) == 0) return(NA_real_)
@@ -120,7 +120,7 @@ diag_dec <- function(p, stat, crit, alpha = 0.05, null = "null") {
 }
 
 hansen_table <- function(model, alpha = 0.05) {
-  h <- tryCatch(panelvar::hansen_j_test(model), error = function(e) e)
+  h <- tryCatch(suppressWarnings(panelvar::hansen_j_test(model)), error = function(e) e)
   if (inherits(h, "error")) {
     return(data.frame(
       test = "Hansen J", statistic = NA_real_, df = NA_real_,
@@ -234,6 +234,63 @@ plot_stability <- function(tab, title = "Stability condition", file = NULL) {
   if (!is.complex(eig)) eig <- suppressWarnings(as.complex(eig))
   graphics::points(Re(eig), Im(eig), pch = 19, col = ifelse(tab$stable, "steelblue", "firebrick"))
   invisible(tab)
+}
+
+pub_diag_table <- function(instrument = NULL, serial = NULL, stability = NULL) {
+  out <- data.frame()
+
+  if (!is.null(instrument) && nrow(instrument) > 0) {
+    out <- rbind(out, data.frame(
+      section = "Instrument validity",
+      test = instrument$test,
+      variable = NA_character_,
+      statistic = instrument$statistic,
+      df = instrument$df,
+      p.value = instrument$p.value,
+      critical.value = instrument$critical.value,
+      decision = instrument$decision,
+      row.names = NULL
+    ))
+  }
+
+  if (!is.null(serial) && nrow(serial) > 0) {
+    out <- rbind(out, data.frame(
+      section = "Serial correlation",
+      test = serial$test,
+      variable = serial$variable,
+      statistic = serial$statistic,
+      df = serial$df,
+      p.value = serial$p.value,
+      critical.value = serial$critical.value,
+      decision = serial$decision,
+      row.names = NULL
+    ))
+  }
+
+  if (!is.null(stability) && nrow(stability) > 0) {
+    ev <- if ("eigenvalue" %in% names(stability)) stability$eigenvalue else stability$Eigenvalue
+    mod <- if ("modulus" %in% names(stability)) stability$modulus else stability$Modulus
+    out <- rbind(out, data.frame(
+      section = "Stability condition",
+      test = paste("Eigenvalue", seq_len(nrow(stability))),
+      variable = as.character(ev),
+      statistic = as.numeric(mod),
+      df = NA_real_,
+      p.value = NA_real_,
+      critical.value = 1,
+      decision = stability$decision,
+      row.names = NULL
+    ))
+  }
+
+  out
+}
+
+print.pav_diag <- function(x, ...) {
+  cat("\nPublication-style post-estimation diagnostics\n")
+  cat("------------------------------------------------\n")
+  print(x$table, row.names = FALSE, ...)
+  invisible(x)
 }
 
 #' Prepare panel data
@@ -518,7 +575,7 @@ pvar <- function(data, id, time, vars, lags = 1,
 #'
 #' @export
 pvdi <- function(obj, alpha = 0.05, serial_lags = c(1, 2),
-                 plot = FALSE, file = NULL) {
+                 plot = TRUE, file = NULL) {
   model <- if (inherits(obj, "pav_pvar")) obj$model else obj
   stab_raw <- panelvar::stability(model)
   stab <- as.data.frame(stab_raw)
@@ -534,17 +591,20 @@ pvdi <- function(obj, alpha = 0.05, serial_lags = c(1, 2),
     unavailable_iv_tests(system = isTRUE(model$system_instruments))
   )
   serial <- serial_table(pvar_resid_list(model), lags = serial_lags, alpha = alpha)
+  table <- pub_diag_table(instrument = instrument, serial = serial, stability = stab)
 
   if (isTRUE(plot) || !is.null(file)) {
     plot_stability(stab, title = "PVAR stability condition", file = file)
   }
 
-  list(
+  structure(list(
+    table = table,
     instrument = instrument,
+    hansen = instrument[instrument$test == "Hansen J", , drop = FALSE],
     serial = serial,
     stability = stab,
     stability_plot = if (isTRUE(plot) || !is.null(file)) "generated" else "not requested"
-  )
+  ), class = "pav_diag")
 }
 
 #' Panel VAR impulse responses
@@ -776,7 +836,7 @@ vecm <- function(data, id, time, vars, lags = 2, rank = 1,
 #'
 #' @export
 vedi <- function(obj, alpha = 0.05, serial_lags = c(1, 2),
-                 plot = FALSE, file = NULL) {
+                 plot = TRUE, file = NULL) {
   if (!inherits(obj, "pav_vecm")) stop("obj must come from vecm().", call. = FALSE)
   stab <- companion_stab(obj$model$A, obj$lags, obj$vars)
   stab$critical.value <- 1
@@ -784,29 +844,32 @@ vedi <- function(obj, alpha = 0.05, serial_lags = c(1, 2),
                           "Stable: modulus below 1",
                           "Unstable: modulus at least 1")
   serial <- serial_table(vecm_resid_list(obj), lags = serial_lags, alpha = alpha)
+  instrument <- data.frame(
+    test = "Instrument validity",
+    statistic = NA_real_, df = NA_real_, p.value = NA_real_,
+    critical.value = NA_real_,
+    null = "Instrument validity is not a VECM post-estimation test",
+    decision = "Not applicable: Panel VECM is not estimated by GMM instruments",
+    available = FALSE,
+    row.names = NULL
+  )
+  table <- pub_diag_table(instrument = instrument, serial = serial, stability = stab)
 
   if (isTRUE(plot) || !is.null(file)) {
     plot_stability(stab, title = "Panel VECM stability condition", file = file)
   }
 
-  list(
+  structure(list(
+    table = table,
     rank_test = obj$rank_test$panel,
-    instrument = data.frame(
-      test = "Instrument validity",
-      statistic = NA_real_, df = NA_real_, p.value = NA_real_,
-      critical.value = NA_real_,
-      null = "Instrument validity is not a VECM post-estimation test",
-      decision = "Not applicable: Panel VECM is not estimated by GMM instruments",
-      available = FALSE,
-      row.names = NULL
-    ),
+    instrument = instrument,
     serial = serial,
     stability = stab,
     stable = all(stab$stable),
     beta = obj$model$beta,
     impact = obj$identified$B,
     stability_plot = if (isTRUE(plot) || !is.null(file)) "generated" else "not requested"
-  )
+  ), class = "pav_diag")
 }
 
 boot_veir <- function(obj, n.ahead, draws, seed) {
