@@ -69,6 +69,46 @@ companion_stab <- function(A, lags, vars) {
   )
 }
 
+get_jstat <- function(model) {
+  out <- tryCatch(panelvar::hansen_j_test(model), error = function(e) NULL)
+  nums <- suppressWarnings(as.numeric(unlist(out)))
+  nums <- nums[is.finite(nums)]
+  if (length(nums) == 0) return(NA_real_)
+  nums[1]
+}
+
+fit_pvar_lag <- function(data, id, time, vars, lag,
+                         transformation, steps, system,
+                         max_instr, min_instr, collapse) {
+  panelvar::pvargmm(
+    dependent_vars = vars,
+    lags = lag,
+    transformation = transformation,
+    data = data,
+    panel_identifier = c(id, time),
+    steps = steps,
+    system_instruments = system,
+    max_instr_dependent_vars = max_instr,
+    min_instr_dependent_vars = min_instr,
+    collapse = collapse
+  )
+}
+
+choose_lag <- function(tab, prefer = "MBIC") {
+  prefer <- toupper(prefer)
+  if (!prefer %in% c("MBIC", "MAIC", "MQIC")) prefer <- "MBIC"
+  ok <- is.finite(tab[[prefer]])
+  if (!any(ok)) return(NA_integer_)
+  tab$lag[which.min(ifelse(ok, tab[[prefer]], Inf))]
+}
+
+safe_varselect <- function(x, max_lag, type) {
+  out <- tryCatch(vars::VARselect(x, lag.max = max_lag, type = type),
+                  error = function(e) NULL)
+  if (is.null(out)) return(NULL)
+  out$selection
+}
+
 #' Prepare panel data
 #'
 #' Sorts a panel data frame and optionally keeps selected variables.
@@ -255,26 +295,66 @@ coint <- function(data, id, time, y = NULL, x = NULL, vars = NULL,
 
 #' Panel VAR lag selection
 #'
-#' Uses `panelvar::pvargmm()` with multiple lag orders.
+#' Estimates each candidate lag separately and computes moment selection
+#' criteria: MBIC, MAIC, and MQIC. The preferred default lag is the lag with
+#' the most negative MBIC.
 #'
 #' @export
 pvls <- function(data, id, time, vars, lags = 1:3,
                  transformation = "fod", steps = "onestep",
                  system = TRUE, max_instr = 4, min_instr = 2L,
-                 collapse = TRUE) {
+                 collapse = TRUE, prefer = "MBIC") {
   data <- as.data.frame(data)
   chk_cols(data, c(id, time, vars))
-  panelvar::pvargmm(
-    dependent_vars = vars,
-    lags = lags,
-    transformation = transformation,
-    data = data,
-    panel_identifier = c(id, time),
-    steps = steps,
-    system_instruments = system,
-    max_instr_dependent_vars = max_instr,
-    min_instr_dependent_vars = min_instr,
-    collapse = collapse
+  lags <- as.integer(lags)
+  k <- length(vars)
+  n <- length(unique(data[[id]]))
+  tt <- length(unique(data[[time]]))
+  nt <- n * tt
+
+  rows <- list()
+  models <- list()
+
+  for (lag in lags) {
+    fit <- tryCatch(
+      fit_pvar_lag(data, id, time, vars, lag, transformation, steps,
+                   system, max_instr, min_instr, collapse),
+      error = function(e) e
+    )
+
+    if (inherits(fit, "error")) {
+      rows[[as.character(lag)]] <- data.frame(
+        lag = lag, J = NA_real_, K2p = k^2 * lag,
+        MBIC = NA_real_, MAIC = NA_real_, MQIC = NA_real_,
+        converged = FALSE, message = fit$message, row.names = NULL
+      )
+    } else {
+      j <- get_jstat(fit)
+      k2p <- k^2 * lag
+      rows[[as.character(lag)]] <- data.frame(
+        lag = lag, J = j, K2p = k2p,
+        MBIC = j - k2p * log(nt),
+        MAIC = j - 2 * k2p,
+        MQIC = j - 2.01 * k2p * log(log(nt)),
+        converged = TRUE, message = NA_character_, row.names = NULL
+      )
+      models[[as.character(lag)]] <- fit
+    }
+  }
+
+  table <- do.call(rbind, rows)
+  row.names(table) <- NULL
+  selected <- choose_lag(table, prefer = prefer)
+
+  structure(
+    list(
+      table = table,
+      selected = selected,
+      criterion = toupper(prefer),
+      rule = "Choose the lag with the most negative criterion; MBIC is the conservative default.",
+      models = models
+    ),
+    class = "pav_pvls"
   )
 }
 
@@ -284,21 +364,22 @@ pvls <- function(data, id, time, vars, lags = 1:3,
 pvar <- function(data, id, time, vars, lags = 1,
                  transformation = "fod", steps = "onestep",
                  system = TRUE, max_instr = 4, min_instr = 2L,
-                 collapse = TRUE) {
+                 collapse = TRUE, prefer = "MBIC") {
   data <- as.data.frame(data)
-  fit <- panelvar::pvargmm(
-    dependent_vars = vars,
-    lags = lags,
-    transformation = transformation,
-    data = data,
-    panel_identifier = c(id, time),
-    steps = steps,
-    system_instruments = system,
-    max_instr_dependent_vars = max_instr,
-    min_instr_dependent_vars = min_instr,
-    collapse = collapse
-  )
-  structure(list(model = fit, vars = vars, id = id, time = time, lags = lags),
+  lag_selection <- NULL
+  if (is.character(lags) && tolower(lags[1]) == "auto") {
+    lag_selection <- pvls(data, id, time, vars, lags = 1:3,
+                          transformation = transformation, steps = steps,
+                          system = system, max_instr = max_instr,
+                          min_instr = min_instr, collapse = collapse,
+                          prefer = prefer)
+    lags <- lag_selection$selected
+    if (is.na(lags)) stop("Automatic lag selection failed for all candidate lags.", call. = FALSE)
+  }
+  fit <- fit_pvar_lag(data, id, time, vars, as.integer(lags), transformation,
+                      steps, system, max_instr, min_instr, collapse)
+  structure(list(model = fit, vars = vars, id = id, time = time,
+                 lags = as.integer(lags), lag_selection = lag_selection),
             class = "pav_pvar")
 }
 
@@ -451,12 +532,77 @@ pfpl <- function(x, n.ahead = 10, file = NULL,
   invisible(tab)
 }
 
+#' Panel VECM lag selection
+#'
+#' Selects the level-VAR lag used behind the Panel VECM. It applies
+#' `vars::VARselect()` country by country and summarizes AIC, BIC/SC, HQ, and
+#' FPE choices across the panel. The default selected lag is the rounded median
+#' BIC/SC lag.
+#'
+#' @export
+vels <- function(data, id, time, vars, lags = 1:4,
+                 type = "const", prefer = "BIC") {
+  data <- as.data.frame(data)
+  chk_cols(data, c(id, time, vars))
+  max_lag <- max(as.integer(lags))
+  ids <- unique(data[[id]])
+  rows <- list()
+
+  for (one_id in ids) {
+    one <- data[data[[id]] == one_id, vars, drop = FALSE]
+    sel <- safe_varselect(one, max_lag = max_lag, type = type)
+    if (is.null(sel)) {
+      rows[[as.character(one_id)]] <- data.frame(
+        id = as.character(one_id), AIC = NA_integer_, HQ = NA_integer_,
+        SC = NA_integer_, FPE = NA_integer_, message = "VARselect failed",
+        row.names = NULL
+      )
+    } else {
+      rows[[as.character(one_id)]] <- data.frame(
+        id = as.character(one_id),
+        AIC = as.integer(sel[grep("AIC", names(sel))[1]]),
+        HQ = as.integer(sel[grep("HQ", names(sel))[1]]),
+        SC = as.integer(sel[grep("SC", names(sel))[1]]),
+        FPE = as.integer(sel[grep("FPE", names(sel))[1]]),
+        message = NA_character_,
+        row.names = NULL
+      )
+    }
+  }
+
+  table <- do.call(rbind, rows)
+  pref_col <- toupper(prefer)
+  if (pref_col == "BIC") pref_col <- "SC"
+  if (!pref_col %in% c("AIC", "HQ", "SC", "FPE")) pref_col <- "SC"
+  vals <- table[[pref_col]]
+  selected <- as.integer(round(stats::median(vals[is.finite(vals)], na.rm = TRUE)))
+  if (!is.finite(selected)) selected <- NA_integer_
+
+  structure(
+    list(
+      table = table,
+      selected = selected,
+      criterion = pref_col,
+      rule = "Panel VECM uses the rounded median country-level selected lag; SC/BIC is the conservative default."
+    ),
+    class = "pav_vels"
+  )
+}
+
 #' Estimate a Panel VECM
 #'
 #' @export
 vecm <- function(data, id, time, vars, lags = 2, rank = 1,
-                 type = "Case3", order = vars) {
+                 type = "Case3", order = vars, prefer = "BIC") {
   data <- as.data.frame(data)
+  lag_selection <- NULL
+  if (is.character(lags) && tolower(lags[1]) == "auto") {
+    lag_selection <- vels(data, id, time, vars, lags = 1:4,
+                          type = "const", prefer = prefer)
+    lags <- lag_selection$selected
+    if (is.na(lags)) stop("Automatic Panel VECM lag selection failed.", call. = FALSE)
+  }
+  lags <- as.integer(lags)
   L.data <- as_panel_list(data, id, time, vars)
   rank_test <- pvars::pcoint.JO(L.data = L.data, lags = lags, type = type)
   fit <- pvars::pvarx.VEC(L.data = L.data, lags = lags, dim_r = rank, type = type)
@@ -464,7 +610,7 @@ vecm <- function(data, id, time, vars, lags = 2, rank = 1,
   structure(list(
     model = fit, identified = ident, rank_test = rank_test,
     L.data = L.data, vars = vars, id = id, time = time, lags = lags,
-    rank = rank, type = type, order = order
+    rank = rank, type = type, order = order, lag_selection = lag_selection
   ), class = "pav_vecm")
 }
 

@@ -4,25 +4,19 @@ Version: 0.2.0
 Authors@R: person("William", "Cantah", email = "williamcantah@example.com", role = c("aut", "cre"))
 Description: Beginner-friendly wrappers for cross-sectional dependence tests,
     panel unit-root tests, panel cointegration tests, Panel VAR estimation,
-    Panel VECM estimation, post-estimation diagnostics, impulse-response
-    tables and plots with confidence intervals, and forecast error variance
-    decomposition tables and plots using existing CRAN econometrics packages.
+    Panel VECM estimation, impulse responses, forecast error variance
+    decompositions, and post-estimation diagnostics using existing CRAN
+    econometrics packages.
 License: MIT + file LICENSE
 Encoding: UTF-8
-Depends:
-    R (>= 4.1.0)
-Imports:
-    plm,
-    pco,
-    panelvar,
-    pvars,
-    vars,
-    stats,
-    graphics,
-    grDevices
-Suggests:
-    readxl,
-    knitr,
-    rmarkdown
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
+Depends: R (>= 4.1.0)
+Imports: plm, pco, panelvar, pvars, vars, stats
+Suggests: readxl, knitr, rmarkdown
 URL: https://github.com/williamcantah/pavem
 BugReports: https://github.com/williamcantah/pavem/issues
+NeedsCompilation: no
+Packaged: 2026-07-05 14:03:14 UTC; williamg.cantah
+Author: William Cantah [aut, cre]
+Maintainer: William Cantah <williamcantah@example.com>

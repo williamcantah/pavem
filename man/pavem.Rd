@@ -15,6 +15,7 @@
 \alias{vedi}
 \alias{veir}
 \alias{vefd}
+\alias{vels}
 \alias{vipl}
 \alias{vfpl}
 \alias{vpub}
@@ -35,10 +36,10 @@ coint(data, id, time, y = NULL, x = NULL, vars = NULL,
       method = c("ped", "jo"), lags = 1, type = "Case3", alpha = 0.05)
 pvls(data, id, time, vars, lags = 1:3, transformation = "fod",
      steps = "onestep", system = TRUE, max_instr = 4,
-     min_instr = 2L, collapse = TRUE)
+     min_instr = 2L, collapse = TRUE, prefer = "MBIC")
 pvar(data, id, time, vars, lags = 1, transformation = "fod",
      steps = "onestep", system = TRUE, max_instr = 4,
-     min_instr = 2L, collapse = TRUE)
+     min_instr = 2L, collapse = TRUE, prefer = "MBIC")
 pvdi(obj)
 pvir(obj, n.ahead = 10, draws = 200, ci = 0.95, cores = 1)
 pvfd(obj, n.ahead = 10)
@@ -47,8 +48,9 @@ pipl(x, n.ahead = 10, draws = 200, ci = 0.95, file = NULL,
 pfpl(x, n.ahead = 10, file = NULL,
      cols = c("steelblue", "goldenrod", "darkseagreen",
               "firebrick", "mediumpurple", "gray50"))
+vels(data, id, time, vars, lags = 1:4, type = "const", prefer = "BIC")
 vecm(data, id, time, vars, lags = 2, rank = 1,
-     type = "Case3", order = vars)
+     type = "Case3", order = vars, prefer = "BIC")
 vedi(obj)
 veir(obj, n.ahead = 10, draws = 200, seed = 123)
 vefd(obj, n.ahead = 10)
@@ -69,6 +71,7 @@ vpub(obj, n.ahead = 10, draws = 200)
 \item{tests}{Panel unit-root tests passed to \code{plm::purtest}.}
 \item{exo}{Deterministic component for panel unit-root tests.}
 \item{lags}{Lag order or lag orders.}
+\item{prefer}{Preferred lag-selection criterion. For PVAR, use \code{"MBIC"}, \code{"MAIC"}, or \code{"MQIC"}. For Panel VECM, use \code{"BIC"}, \code{"AIC"}, \code{"HQ"}, or \code{"FPE"}.}
 \item{y}{Dependent variable for Pedroni cointegration test.}
 \item{x}{Regressor variable for Pedroni cointegration test, or a fitted model / IRF / FEVD result object for plotting functions.}
 \item{method}{Cointegration method: \code{"ped"} or \code{"jo"}.}
@@ -109,12 +112,16 @@ urts(d, "country", "year", c("inflation", "gdp_growth", "interest_rate"))
 coint(d, "country", "year", y = "inflation", x = "interest_rate")
 
 pf <- pvar(d, "country", "year", c("inflation", "gdp_growth", "interest_rate"))
+pvls(d, "country", "year", c("inflation", "gdp_growth", "interest_rate"))
+pfa <- pvar(d, "country", "year", c("inflation", "gdp_growth", "interest_rate"), lags = "auto")
 pvir(pf)$table
 pvfd(pf)$table
 pipl(pf, file = "pvar_irf.pdf")
 pfpl(pf, file = "pvar_fevd.pdf")
 
 vf <- vecm(d, "country", "year", c("inflation", "gdp_growth", "interest_rate"))
+vels(d, "country", "year", c("inflation", "gdp_growth", "interest_rate"))
+vfa <- vecm(d, "country", "year", c("inflation", "gdp_growth", "interest_rate"), lags = "auto")
 vpub(vf)
 vipl(vf, file = "vecm_irf.pdf")
 vfpl(vf, file = "vecm_fevd.pdf")
