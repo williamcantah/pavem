@@ -1040,6 +1040,163 @@ vfpl <- function(x, n.ahead = 10, file = NULL,
   invisible(tab)
 }
 
+coef_status <- function(p.value, alpha) {
+  ifelse(is.na(p.value), "Not available",
+         ifelse(p.value < alpha, "Significant*", "Insignificant"))
+}
+
+mg_table <- function(coef, var, dep, alpha, labels = NULL) {
+  n <- rep(NA_integer_, length(coef))
+  if (!is.null(dim(var)) && length(dim(var)) == 3) {
+    n <- apply(var[dep, , , drop = FALSE], 2, function(z) sum(is.finite(z)))
+  }
+  if (length(n) != length(coef)) n <- rep(NA_integer_, length(coef))
+  se <- sqrt(as.numeric(var) / n)
+  se[!is.finite(se)] <- NA_real_
+  t.stat <- as.numeric(coef) / se
+  df <- pmax(n - 1, 1)
+  p.value <- 2 * stats::pt(-abs(t.stat), df = df)
+  p.value[!is.finite(p.value)] <- NA_real_
+  data.frame(
+    variable = if (is.null(labels)) names(coef) else labels,
+    coefficient = as.numeric(coef),
+    std.error = se,
+    t.statistic = t.stat,
+    p.value = p.value,
+    status = coef_status(p.value, alpha),
+    row.names = NULL
+  )
+}
+
+norm_beta_tables <- function(beta_coef, dep, alpha) {
+  vars <- dimnames(beta_coef)[[1]]
+  dep_pos <- match(paste0(dep, ".l1"), vars)
+  if (is.na(dep_pos)) dep_pos <- match(dep, vars)
+  if (is.na(dep_pos)) stop("Could not find dependent variable in beta.", call. = FALSE)
+
+  rows <- list()
+  for (v in vars[-dep_pos]) {
+    v_pos <- match(v, vars)
+    vals <- -beta_coef[v_pos, 1, ] / beta_coef[dep_pos, 1, ]
+    vals <- vals[is.finite(vals)]
+    coef <- mean(vals, na.rm = TRUE)
+    se <- stats::sd(vals, na.rm = TRUE) / sqrt(length(vals))
+    if (!is.finite(se) || se == 0) se <- NA_real_
+    t.stat <- coef / se
+    p.value <- 2 * stats::pt(-abs(t.stat), df = max(length(vals) - 1, 1))
+    rows[[v]] <- data.frame(
+      variable = sub("\\.l[0-9]+$", "", v),
+      coefficient = coef,
+      std.error = se,
+      t.statistic = t.stat,
+      p.value = p.value,
+      status = coef_status(p.value, alpha),
+      row.names = NULL
+    )
+  }
+  do.call(rbind, rows)
+}
+
+short_labels <- function(x) {
+  out <- sub("^const$", "Constant", x)
+  out <- sub("\\.l([0-9]+)$", " lag \\1", out)
+  ifelse(out == "Constant", out, paste0("D(", out, ")"))
+}
+
+#' Extract Panel VECM Long-Run and Short-Run Results
+#'
+#' Creates publication-style coefficient tables from a fitted Panel VECM. A
+#' separate long-run and short-run table is created for each dependent variable.
+#'
+#' @param obj Object returned by `vecm()`.
+#' @param alpha Significance level used for the status column.
+#' @return A list with `long_run`, `short_run`, and `combined` tables.
+#' @export
+vres <- function(obj, alpha = 0.05) {
+  if (!inherits(obj, "pav_vecm")) stop("obj must come from vecm().", call. = FALSE)
+  mg <- obj$model$MG_VECM
+  vars <- obj$vars
+
+  if (is.null(mg$beta$coef) || is.null(mg$alpha$coef) || is.null(mg$GAMMA$coef)) {
+    stop("The fitted VECM object does not contain the required mean-group coefficients.",
+         call. = FALSE)
+  }
+
+  long_run <- list()
+  short_run <- list()
+  combined <- data.frame()
+
+  for (dep in vars) {
+    long <- norm_beta_tables(mg$beta$coef, dep = dep, alpha = alpha)
+    long$dependent <- dep
+    long$scenario <- "Long-run"
+    long_run[[dep]] <- long[, c("dependent", "scenario", "variable",
+                                "coefficient", "std.error", "t.statistic",
+                                "p.value", "status")]
+
+    dep_pos <- match(dep, rownames(mg$alpha$mean))
+    a_coef <- mg$alpha$mean[dep_pos, , drop = TRUE]
+    a_var <- mg$alpha$var[dep_pos, , drop = TRUE]
+    a_n <- sum(is.finite(mg$alpha$coef[dep_pos, 1, ]))
+    a_se <- sqrt(as.numeric(a_var) / a_n)
+    a_t <- as.numeric(a_coef) / a_se
+    a_p <- 2 * stats::pt(-abs(a_t), df = max(a_n - 1, 1))
+    alpha_tab <- data.frame(
+      variable = "Cointegrating equation",
+      coefficient = as.numeric(a_coef),
+      std.error = a_se,
+      t.statistic = a_t,
+      p.value = a_p,
+      status = coef_status(a_p, alpha),
+      row.names = NULL
+    )
+
+    g_coef <- mg$GAMMA$mean[dep_pos, , drop = TRUE]
+    g_var <- mg$GAMMA$var[dep_pos, , drop = TRUE]
+    g_n <- apply(mg$GAMMA$coef[dep_pos, , , drop = FALSE], 2,
+                 function(z) sum(is.finite(z)))
+    g_se <- sqrt(as.numeric(g_var) / g_n)
+    g_se[!is.finite(g_se)] <- NA_real_
+    g_t <- as.numeric(g_coef) / g_se
+    g_p <- 2 * stats::pt(-abs(g_t), df = pmax(g_n - 1, 1))
+    gamma_tab <- data.frame(
+      variable = short_labels(names(g_coef)),
+      coefficient = as.numeric(g_coef),
+      std.error = g_se,
+      t.statistic = g_t,
+      p.value = g_p,
+      status = coef_status(g_p, alpha),
+      row.names = NULL
+    )
+
+    short <- rbind(alpha_tab, gamma_tab)
+    short$dependent <- dep
+    short$scenario <- "Short-run"
+    short_run[[dep]] <- short[, c("dependent", "scenario", "variable",
+                                  "coefficient", "std.error", "t.statistic",
+                                  "p.value", "status")]
+
+    combined <- rbind(combined, long_run[[dep]], short_run[[dep]])
+  }
+  rownames(combined) <- NULL
+
+  structure(
+    list(long_run = long_run, short_run = short_run, combined = combined),
+    class = "pav_vres"
+  )
+}
+
+print.pav_vres <- function(x, ...) {
+  for (dep in names(x$long_run)) {
+    cat("\n", dep, " as the dependent variable\n", sep = "")
+    cat("\nLong-run scenario\n")
+    print(x$long_run[[dep]][, -c(1, 2)], row.names = FALSE)
+    cat("\nShort-run scenario (error correction)\n")
+    print(x$short_run[[dep]][, -c(1, 2)], row.names = FALSE)
+  }
+  invisible(x)
+}
+
 #' Publication-ready Panel VECM results
 #'
 #' @export
@@ -1048,6 +1205,7 @@ vpub <- function(obj, n.ahead = 10, draws = 200) {
   list(
     model_coefficients = obj$model$A,
     beta = obj$model$beta,
+    vecm_results = vres(obj),
     diagnostics = vedi(obj),
     irf = veir(obj, n.ahead = n.ahead, draws = draws)$table,
     fevd = vefd(obj, n.ahead = n.ahead)

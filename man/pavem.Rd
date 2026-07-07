@@ -18,6 +18,7 @@
 \alias{vels}
 \alias{vipl}
 \alias{vfpl}
+\alias{vres}
 \alias{vpub}
 \title{Simple Panel VAR and Panel VECM Workflows}
 \description{
@@ -59,6 +60,7 @@ vipl(x, n.ahead = 10, draws = 200, seed = 123, file = NULL,
 vfpl(x, n.ahead = 10, file = NULL,
      cols = c("steelblue", "goldenrod", "darkseagreen",
               "firebrick", "mediumpurple", "gray50"))
+vres(obj, alpha = 0.05)
 vpub(obj, n.ahead = 10, draws = 200)
 }
 \arguments{
@@ -100,6 +102,8 @@ vpub(obj, n.ahead = 10, draws = 200)
 \value{
 Data frames, lists, or fitted model objects depending on the function. IRF and
 FEVD functions include table outputs suitable for export or publication.
+\code{vres()} returns publication-style long-run and short-run Panel VECM
+coefficient tables for each dependent variable.
 }
 \examples{
 \dontrun{
@@ -124,6 +128,7 @@ pfpl(pf, file = "pvar_fevd.pdf")
 vf <- vecm(d, "country", "year", c("inflation", "gdp_growth", "interest_rate"))
 vels(d, "country", "year", c("inflation", "gdp_growth", "interest_rate"))
 vfa <- vecm(d, "country", "year", c("inflation", "gdp_growth", "interest_rate"), lags = "auto")
+vres(vf)
 vpub(vf)
 vipl(vf, file = "vecm_irf.pdf")
 vfpl(vf, file = "vecm_fevd.pdf")
